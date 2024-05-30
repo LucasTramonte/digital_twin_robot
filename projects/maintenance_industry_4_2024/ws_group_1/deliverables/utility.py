@@ -115,7 +115,7 @@ class FaultDetectReg():
         return y_label_pred, y_response_pred
 
 
-    def predict(self, df_x_test, y_response_test):
+    def predict(self, df_x_test, y_response_test, complement_truncation=False):
         ''' ### Description
         Predict the labels using the trained regression model and the measured response variable.
         Note that if a fault is predicted, the predicted, not measured response variable will be used to concatenate features
@@ -124,6 +124,7 @@ class FaultDetectReg():
         ### Parameters
         - df_x_test: The testing features.
         - y_response_test: The measured response variable.
+        - complement_truncation: If True, the truncated points in each sequence before the first sliding window will be complemented. Default is Faulse.
 
         ### Return
         - y_label_pred: The predicted labels.
@@ -133,6 +134,11 @@ class FaultDetectReg():
         window_size = self.window_size
         sample_step = self.sample_step
         prediction_lead_time = self.pred_lead_time
+
+        # Handle exception.
+        if 'test_condition' not in df_x_test.columns:
+            # Add the 'test_condition' column with all values set to 'unspecified'
+            df_x_test['test_condition'] = 'unspecified'
 
         # Get the sequence names.
         sequence_name_list = df_x_test['test_condition'].unique().tolist()
@@ -180,8 +186,18 @@ class FaultDetectReg():
                     y_temp_local.iloc[i-1] = tmp_y_temp_pred[-1]
 
             # Save the results and proceed to the next sequence.
-            y_label_pred.extend(y_label_pred_tmp)
-            y_response_pred.extend(y_temp_pred_tmp)
+            if complement_truncation: # If we need to complement, complement with 0.
+                len_diff = len(df_x_test_seq) - len(y_label_pred_tmp)
+                # If df_x_test_seq is smaller, adjust the length of y_label_pred_tmp
+                if len_diff > 0:                    
+                    # Create a list of the first element repeated len_diff times
+                    y_label_pred_tmp = np.concatenate((np.full(len_diff, y_label_pred_tmp[0]), y_label_pred_tmp))               
+                    y_temp_pred_tmp = np.concatenate((np.full(len_diff, y_temp_pred_tmp[0]), y_temp_pred_tmp))
+                y_label_pred.extend(y_label_pred_tmp)
+                y_response_pred.extend(y_temp_pred_tmp)
+            else:
+                y_label_pred.extend(y_label_pred_tmp)
+                y_response_pred.extend(y_temp_pred_tmp)
 
         return y_label_pred, y_response_pred
 
@@ -266,11 +282,11 @@ class FaultDetectReg():
 
                
             # Predict for the testing data.
-            y_pred, y_response_test_pred = self.predict(df_x_test=df_test, y_response_test=y_response_test)
+            y_pred, y_response_test_pred = self.predict(df_x_test=df_test, y_response_test=y_response_test, complement_truncation=True)
 
             # Calculate the performance.
-            # Truncate the true values for y_test and y_response_test in the same format as the concatenated features.
-            _, y_test = prepare_sliding_window(df_x=df_test, y=y_test, window_size=self.window_size, sample_step=self.sample_step, prediction_lead_time=self.pred_lead_time, mdl_type='clf')
+            # # Truncate the true values for y_test and y_response_test in the same format as the concatenated features.
+            # _, y_test = prepare_sliding_window(df_x=df_test, y=y_test, window_size=self.window_size, sample_step=self.sample_step, prediction_lead_time=self.pred_lead_time, mdl_type='clf')
             accuracy, precision, recall, f1 = cal_classification_perf(y_test, pd.Series(y_pred))
             perf[counter, :] = np.array([accuracy, precision, recall, f1])
             
@@ -280,8 +296,8 @@ class FaultDetectReg():
                     # Show the results.
                     fig_1 = plt.figure(figsize = (8,18))
                     axes_test = [fig_1.add_subplot(3, 1, 1), fig_1.add_subplot(3, 1, 2), fig_1.add_subplot(3, 1, 3)]
-                    _, y_response_test = prepare_sliding_window(df_x=df_test, y=y_response_test, window_size=self.window_size, sample_step=self.sample_step, prediction_lead_time=self.pred_lead_time, mdl_type='reg')
-                    show_reg_result_single_run(y_response_test, y_response_test_pred, axes_test, 'testing', self.threshold)
+                    # _, y_response_test = prepare_sliding_window(df_x=df_test, y=y_response_test, window_size=self.window_size, sample_step=self.sample_step, prediction_lead_time=self.pred_lead_time, mdl_type='reg')
+                    show_reg_result_single_run(y_response_test.reset_index(drop=True), y_response_test_pred, axes_test, 'testing', self.threshold)
 
                     fig_2 = plt.figure(figsize = (8,12))
                     ax_test_true = fig_2.add_subplot(2,1,1)
@@ -443,8 +459,8 @@ def read_all_test_data_from_path(base_dictionary: str, pre_processing: callable=
     # Only keep the folders, not the excel file.
     # Filter out only directories, excluding .xlsx files
     path_list = [item for item in path_list if os.path.isdir(os.path.join(base_dictionary, item))]
-
-    # path_list_sorted = sorted(path_list)
+    # Make sure in ascending order.
+    path_list = sorted(path_list)
     # path_list = path_list_sorted[:-1]
 
     # Read the data.
@@ -649,34 +665,71 @@ def prepare_sliding_window(df_x, y=None, sequence_name_list=None, window_size=1,
     # If no sequence_list is given, extract all the unique values from 'test_condition'.
     if sequence_name_list is None:
         sequence_name_list = df_x['test_condition'].unique().tolist()
+    
+    # Define a function to complete the window.
+    def complete_window(df_before_complete):
+        # Check if the input is a DataFrame or Series
+        if isinstance(df_before_complete, pd.DataFrame):
+            is_series = False
+            n_size = len(df_before_complete)
+        elif isinstance(df_before_complete, pd.Series):
+            is_series = True
+            n_size = len(df_before_complete)
+            df_before_complete = df_before_complete.to_frame(name='Value')
+        else:
+            raise ValueError("Input must be a pandas DataFrame or Series.")
+        
+        # Check if the input DataFrame or Series already meets or exceeds the window size
+        if n_size >= window_size:
+            return df_before_complete if not is_series else df_before_complete.iloc[0]
+        
+        # Get the first row of the DataFrame
+        first_row = df_before_complete.iloc[0]
+        
+        # Create a DataFrame with the necessary number of copies of the first row
+        new_rows = pd.DataFrame([first_row] * (window_size - n_size), columns=df_before_complete.columns)
+        
+        # Concatenate the new rows with the original DataFrame
+        df_after_complete = pd.concat([new_rows, df_before_complete], ignore_index=True)
+        
+        # Convert back to Series if the original input was a Series
+        if is_series:
+            df_after_complete = df_after_complete.iloc[:, 0]
+        
+        return df_after_complete
+
 
     # Process sequence by sequence.
     for name in sequence_name_list:
         # Extract one sequence.
         df_tmp = df_x[df_x['test_condition']==name]
-
-        # Check if we need to slide y:
-        if y is not None: # If y is given: We are in the training mode.
+        if y is not None: # If y is given: Slide y as well.
             y_tmp = y[df_x['test_condition']==name]
-            # Do a loop to concatenate features by sliding the window.
+
+            for i in range(1, window_size): # If not enough data in the window                
+                df_input = df_tmp.iloc[0:i, :]
+                df_input = complete_window(df_input)
+
+                y_input = y_tmp.iloc[0:i]                
+                y_input = complete_window(y_input)
+
+                X_window, y_window = concatenate_features(df_input=df_input, y_input=y_input,
+                    X_window=X_window, y_window=y_window, window_size=window_size, sample_step=sample_step, prediction_lead_time=prediction_lead_time, mdl_type=mdl_type)
+
             for i in range(window_size, len(df_tmp)+1):
                 X_window, y_window = concatenate_features(df_input=df_tmp.iloc[i-window_size:i, :], y_input=y_tmp.iloc[i-window_size:i], 
                     X_window=X_window, y_window=y_window, window_size=window_size, sample_step=sample_step, prediction_lead_time=prediction_lead_time, mdl_type=mdl_type)
-        else: # If y is not given: We are in the testing mode.
+        else: # If y is not given.
             for i in range(1, window_size): # If not enough data in the window
                 df_input = df_tmp.iloc[0:i, :]
-                n_size = len(df_input)
-                first_row = df_input.iloc[0]
-                new_rows = pd.DataFrame([first_row] * (window_size-n_size), columns=df_input.columns)
-                df_input = pd.concat([new_rows, df_input], ignore_index=True)
-
+                df_input = complete_window(df_input)
                 X_window = concatenate_features(df_input=df_input, 
                     X_window=X_window, window_size=window_size, sample_step=sample_step, prediction_lead_time=prediction_lead_time, mdl_type=mdl_type)
 
             for i in range(window_size, len(df_tmp)+1):
                 X_window = concatenate_features(df_input=df_tmp.iloc[i-window_size:i, :], 
                     X_window=X_window, window_size=window_size, sample_step=sample_step, prediction_lead_time=prediction_lead_time, mdl_type=mdl_type)
-        
+
     # Transform into dataframe.
     X_window = pd.DataFrame(X_window)
 
