@@ -141,6 +141,7 @@ class FaultDetectReg():
             df_x_test['test_condition'] = 'unspecified'
 
         # Get the sequence names.
+        df_x_test['test_condition']
         sequence_name_list = df_x_test['test_condition'].unique().tolist()
 
         # Initial values
